@@ -371,8 +371,10 @@ if __name__ == '__main__':
     sys_paras = parse_args(parser)
     set_random_seed(sys_paras.seed)
     print(f'Gamma: {sys_paras.gamma}; Beta: {sys_paras.beta}')
-
+    start = time.time()
     if sys_paras.model == 'lightgcn' or sys_paras.model == 'lg':
         run_init_exp(sys_paras)
     else:
         using_new_model(sys_paras)
+    end = time.time()
+    print(f"Running time for PPAC: {end - start:.4f} seconds")
