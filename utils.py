@@ -255,6 +255,44 @@ def test_model(model, train_records, test_records, global_pop, graph=None, candi
                 results['ndcg'][topk].extend(result['ndcg'][idx])
                 results['arp'][topk].extend(result['arp'][idx])
         results['users'] = [user for user_lst in users_list for user in user_lst]
+        dataset = getattr(model, 'dataset', None)
+        quartile_dir = os.path.join('dataset', str(dataset)) if dataset is not None else None
+        results['quartiles'] = {}
+        if quartile_dir and os.path.isdir(quartile_dir):
+            for q in range(1, 5):
+                path = os.path.join(quartile_dir, f'test_q{q}.txt')
+                if not os.path.isfile(path):
+                    continue
+                q_records = collections.defaultdict(list)
+                with open(path, 'r') as f:
+                    for line in f:
+                        fields = line.split()
+                        if len(fields) < 2:
+                            continue
+                        user = int(fields[0])
+                        if user in train_records:
+                            q_records[user].extend(int(item) for item in fields[1:])
+
+                q_metrics = {metric: {k: [] for k in TOP_Ks}
+                             for metric in ('precision', 'recall', 'hr', 'ndcg', 'arp')}
+                for batch_users, rating in zip(users_list, rating_list):
+                    rows = [i for i, user in enumerate(batch_users) if user in q_records]
+                    if not rows:
+                        continue
+                    q_truth = [q_records[batch_users[i]] for i in rows]
+                    batch_result = test_one_batch((rating[rows], q_truth), TOP_Ks, global_pop)
+                    for idx, k in enumerate(TOP_Ks):
+                        for metric in q_metrics:
+                            q_metrics[metric][k].extend(batch_result[metric][idx])
+
+                q_means = {metric: {k: float(np.mean(values)) if values else 0.0
+                                    for k, values in by_k.items()}
+                           for metric, by_k in q_metrics.items()}
+                results['quartiles'][f'test_q{q}'] = q_means
+                print(f"test_q{q} (users={len(q_records)}): " + '; '.join(
+                    f'{metric}@{k}={q_means[metric][k]:.4f}'
+                    for metric in ('precision', 'recall', 'ndcg', 'hr', 'arp')
+                    for k in TOP_Ks))
         return results
 
 
