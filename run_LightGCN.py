@@ -1,5 +1,7 @@
 import argparse
 import json
+import glob
+import os
 
 import time
 
@@ -15,6 +17,55 @@ from utils import *
 from utils import test_cointer_model
 
 TOP_K = 30
+
+
+def read_interaction_file(path, train_users=None):
+    records = collections.defaultdict(list)
+    with open(path, 'r') as stream:
+        for line in stream:
+            fields = line.strip().split()
+            if len(fields) < 2:
+                continue
+            user = int(fields[0])
+            if train_users is None or user in train_users:
+                records[user].extend(int(item) for item in fields[1:])
+    return records
+
+
+def kuai_candidates(dataset_dir, mode, source_file):
+    if mode != source_file:
+        return None
+    source_path = os.path.join(dataset_dir, source_file + '.txt')
+    return sorted({item for items in read_interaction_file(source_path).values()
+                   for item in items})
+
+
+def evaluate_all_test_files(model, train_records, dataset, global_pop, graph, candidate_items):
+    dataset_dir = os.path.join('dataset', dataset)
+    paths = sorted(path for path in glob.glob(os.path.join(dataset_dir, '*.txt'))
+                   if 'test' in os.path.basename(path).lower())
+    if not paths:
+        raise FileNotFoundError(f'No test files found in {dataset_dir}')
+    outputs = {}
+    for path in paths:
+        records = read_interaction_file(path, set(train_records))
+        result = test_model(model, train_records, records, global_pop, graph, candidate_items)
+        outputs[os.path.basename(path)] = {
+            'users_evaluated': len(result['users']),
+            'metrics': {
+                metric: {str(k): float(np.mean(values)) if values else 0.0
+                         for k, values in result[metric].items()}
+                for metric in ('precision', 'recall', 'hr', 'ndcg', 'arp')
+            }
+        }
+        print(f"{os.path.basename(path)}: " + '; '.join(
+            f"{metric}@{k}={outputs[os.path.basename(path)]['metrics'][metric][str(k)]:.6f}"
+            for metric in ('recall', 'ndcg', 'hr') for k in TOP_Ks))
+    os.makedirs('res_dict', exist_ok=True)
+    output_path = f'res_dict/res_{dataset}_{model.__class__.__name__}_all_test_files.json'
+    with open(output_path, 'w') as stream:
+        json.dump(outputs, stream, indent=2)
+    print(f'All test-file metrics saved to {output_path}')
 
 
 def set_random_seed(seed):
@@ -58,6 +109,11 @@ def run_init_exp(sys_paras):
     dataset = sys_paras.dataset
     similarity_coe = sys_paras.sim_coe
     test_records, train_records, device, i_num, params = read_dataset(dataset, sys_paras.debias_data)
+    dataset_dir = os.path.join('dataset', dataset)
+    is_kuai = dataset.lower() == 'kuairec'
+    valid_records = read_interaction_file(os.path.join(dataset_dir, 'valid.txt'), set(train_records)) if is_kuai else test_records
+    valid_candidates = kuai_candidates(dataset_dir, sys_paras.kuai_valid_item_candidates, 'valid') if is_kuai else None
+    test_candidates = kuai_candidates(dataset_dir, sys_paras.kuai_item_candidates, 'test') if is_kuai else None
     print(f'#Users: {len(train_records)}')
     print(f'avg #interactions per usr: {sum([len(train_records[u]) for u in train_records]) / len(train_records)}')
 
@@ -66,7 +122,8 @@ def run_init_exp(sys_paras):
     graph = create_train_graph(train_records, params).to(device)
     global_pop = F.normalize(cal_global_nov(train_records, i_num)[1].float(), dim=0).numpy()
     if sys_paras.train:
-        train_model(dataset, device, i_num, test_records, train_records, model, sys_paras, graph, global_pop)
+        train_model(dataset, device, i_num, valid_records, train_records, model, sys_paras, graph, global_pop,
+                    valid_candidates)
 
     if os.path.exists(f'checkpoints/{sys_paras.sim_coe}-{sys_paras.model}-{dataset}-{sys_paras.ablation}.pt'):
         model.load_state_dict(
@@ -82,7 +139,7 @@ def run_init_exp(sys_paras):
             torch.load(f'checkpoints/{sys_paras.model}-{dataset}.pt', map_location=device),
             strict=False)
 
-    res = test_model(model, train_records, test_records, global_pop, graph)
+    res = test_model(model, train_records, test_records, global_pop, graph, test_candidates)
     sim_users = cal_sim_users(dataset, similarity_coe, train_records)
     GNov_results, LNov_results, GPRU_results, LPRU_results, global_pop, local_pop = test_cointer_model(model,
                                                                                                        train_records,
@@ -123,6 +180,7 @@ def run_init_exp(sys_paras):
     res_file_path = f'res_dict/res_{sys_paras.dataset}_{sys_paras.model}_{sys_paras.sim_coe}_2.json'
     with open(res_file_path, 'w') as convert_file:
         convert_file.write(json.dumps(res))
+    evaluate_all_test_files(model, train_records, dataset, global_pop, graph, test_candidates)
 
 
 def draw_boxplot(cointer_rs, ori_co_sims, random_rs, sys_paras):
@@ -190,7 +248,8 @@ def draw_fig(fake_rs, real_rs, sys_paras):
     # plt.show()
 
 
-def train_model(dataset, device, i_num, test_records, train_records, model, params, graph, global_pop):
+def train_model(dataset, device, i_num, test_records, train_records, model, params, graph, global_pop,
+                candidate_items=None):
     optimizer = torch.optim.Adam(model.parameters(), lr=params.lr)
     total_epoch = 1000
     best_epoch = 0
@@ -214,7 +273,7 @@ def train_model(dataset, device, i_num, test_records, train_records, model, para
             total_loss += loss.item()
             runs += 1
         model.eval()
-        results = test_model(model, train_records, test_records, global_pop, graph)
+        results = test_model(model, train_records, test_records, global_pop, graph, candidate_items)
         # ndcg = sum(results['ndcg'][TOP_Ks[1]]) / len(results['ndcg'][TOP_Ks[1]])
         recall = sum(results['recall'][TOP_Ks[0]]) / len(results['recall'][TOP_Ks[0]])
         if recall > best_res:
@@ -289,6 +348,11 @@ def using_new_model(sys_paras):
     dataset = sys_paras.dataset
     sim_k = sys_paras.sim_coe
     test_records, train_records, device, i_num, params = read_dataset(dataset, sys_paras.debias_data)
+    dataset_dir = os.path.join('dataset', dataset)
+    is_kuai = dataset.lower() == 'kuairec'
+    valid_records = read_interaction_file(os.path.join(dataset_dir, 'valid.txt'), set(train_records)) if is_kuai else test_records
+    valid_candidates = kuai_candidates(dataset_dir, sys_paras.kuai_valid_item_candidates, 'valid') if is_kuai else None
+    test_candidates = kuai_candidates(dataset_dir, sys_paras.kuai_item_candidates, 'test') if is_kuai else None
     params['rAdj'] = sys_paras.rAdj
     graph = create_train_graph(train_records, params).to(device)
     sim_users = cal_sim_users(dataset, sim_k, train_records)
@@ -297,7 +361,8 @@ def using_new_model(sys_paras):
 
     global_pop = F.normalize(cal_global_nov(train_records, i_num)[1].float(), dim=0).numpy()
     if sys_paras.train:
-        train_model(dataset, device, i_num, test_records, train_records, model, sys_paras, graph, global_pop)
+        train_model(dataset, device, i_num, valid_records, train_records, model, sys_paras, graph, global_pop,
+                    valid_candidates)
 
     if os.path.exists(f'checkpoints/{sys_paras.sim_coe}-{sys_paras.model}-{dataset}-{sys_paras.ablation}.pt'):
         model.load_state_dict(
@@ -313,7 +378,7 @@ def using_new_model(sys_paras):
             strict=False)
 
     time1 = time.time()
-    res = test_model(model, train_records, test_records, global_pop, graph)
+    res = test_model(model, train_records, test_records, global_pop, graph, test_candidates)
     time2 = time.time()
     print(
         f"Inference time: {time2 - time1:.2f}s; #Interactions: {params['num_users'] * params['num_items']};"
@@ -364,6 +429,7 @@ def using_new_model(sys_paras):
                   f'NDCG@{topk}: {sum(res["ndcg"][topk]) / len(res["ndcg"][topk]):.6f} '
                   f'HR@{topk}: {sum(res["hr"][topk]) / len(res["hr"][topk]):.6f} '
                   f'ARP@{topk}: {sum(res["arp"][topk]) / len(res["arp"][topk]):.6f};  ')
+    evaluate_all_test_files(model, train_records, dataset, global_pop, graph, test_candidates)
 
 
 if __name__ == '__main__':

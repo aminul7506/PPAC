@@ -194,9 +194,11 @@ def cal_local_nov(dataset, sim_users, train_records, num_items):
     return torch.tensor(local_nov), torch.tensor(local_pop)
 
 
-def test_model(model, train_records, test_records, global_pop, graph=None):
+def test_model(model, train_records, test_records, global_pop, graph=None, candidate_items=None):
     model.eval()
-    max_K = max(TOP_Ks)
+    max_K = min(max(TOP_Ks), len(candidate_items)) if candidate_items is not None else max(TOP_Ks)
+    if max_K == 0:
+        raise ValueError('The candidate item set is empty.')
     results = {'precision': dict(),
                'recall': dict(),
                'hr': dict(),
@@ -225,6 +227,11 @@ def test_model(model, train_records, test_records, global_pop, graph=None):
                 rating = model.get_user_ratings(batch_users_gpu, graph)
             else:
                 rating = model.get_user_ratings(batch_users_gpu)
+            if candidate_items is not None:
+                candidate_items_gpu = torch.as_tensor(candidate_items, dtype=torch.long, device=rating.device)
+                candidate_mask = torch.ones(rating.shape[1], dtype=torch.bool, device=rating.device)
+                candidate_mask[candidate_items_gpu] = False
+                rating[:, candidate_mask] = -float('inf')
             exclude_index = []
             exclude_items = []
             for range_i, items in enumerate(allPos):

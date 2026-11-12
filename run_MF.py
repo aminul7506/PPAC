@@ -52,6 +52,11 @@ def parse_args(parser):
     parser.add_argument('--ncf', action='store_true', help='whether use NCF for MF model')
     parser.add_argument('--debias_data', default=True, type=bool, help='whether use debiased test')
     parser.add_argument('--train', action='store_true', help='whether we train the model')
+    parser.add_argument('--kuai-item-candidates', choices=['all', 'test'], default='all',
+                        help='KuaiRec test ranking catalog: all items or items in test.txt')
+    parser.add_argument('--kuai-valid-item-candidates', '--kuai_valid_item_candidates',
+                        choices=['all', 'valid'], default='all',
+                        help='KuaiRec validation ranking catalog: all items or items in valid.txt')
 
     sys_paras = parser.parse_args()
 
